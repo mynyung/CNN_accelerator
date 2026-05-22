@@ -9,24 +9,24 @@ module conv2 #(
     input wire start,
     output reg done,
 
-    output wire [9:0]       fm1_addr0,
-    output wire [9:0]       fm1_addr1,
-    output wire [9:0]       fm1_addr2,
-    output wire [9:0]       fm1_addr3,
+    output wire [9:0]        fm1_addr0,
+    output wire [9:0]        fm1_addr1,
+    output wire [9:0]        fm1_addr2,
+    output wire [9:0]        fm1_addr3,
 
-    input wire signed [7:0] fm1_dout0,
-    input wire signed [7:0] fm1_dout1,
-    input wire signed [7:0] fm1_dout2,
-    input wire signed [7:0] fm1_dout3,
+    input wire signed [7:0]  fm1_dout0,
+    input wire signed [7:0]  fm1_dout1,
+    input wire signed [7:0]  fm1_dout2,
+    input wire signed [7:0]  fm1_dout3,
 
-    output wire             fm1_pass_sel,
+    output wire              fm1_pass_sel,
 
-    output reg  [10:0]      w_addr,
+    output reg  [10:0]       w_addr,
     input  wire signed [7:0] w_dout,
 
-    output reg  [13:0]      fm2_addr,
+    output reg  [13:0]       fm2_addr,
     output reg  signed [7:0] fm2_din,
-    output reg              fm2_we
+    output reg               fm2_we
 );
 
     // -----------------------------------------------------------------------
@@ -173,8 +173,6 @@ module conv2 #(
     wire lb_done;
     wire [9:0] lb_rd_addr;
 
-    // Forward line-buffer read address directly to fm1 BRAMs.
-    // Do not register this again in conv2, otherwise BRAM data becomes misaligned.
     assign fm1_addr0 = lb_rd_addr;
     assign fm1_addr1 = lb_rd_addr;
     assign fm1_addr2 = lb_rd_addr;
@@ -238,7 +236,6 @@ module conv2 #(
 
     // -----------------------------------------------------------------------
     // Convert line buffer outputs to lb_win[0:35]
-    // Same order as pix[0:35]
     // -----------------------------------------------------------------------
     wire signed [7:0] lb_win [0:NUM_MMU_MACS-1];
 
@@ -283,11 +280,7 @@ module conv2 #(
     assign lb_win[35] = lb_w8_ch3;
 
     // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // Partial-sum buffer for latency-optimized pass/x loop order.
-    // pass 0 computes every x and stores psum_arr[x][lane].
-    // pass 1 reuses the same line buffer for every x and adds psum_arr[x][lane].
+    // Partial-sum buffer
     // -----------------------------------------------------------------------
     reg signed [31:0] psum_arr [0:OUT_W-1][0:NUM_OC_PAR-1];
 
@@ -305,6 +298,7 @@ module conv2 #(
     localparam S_COMPUTE_WAIT = 4'd8;
     localparam S_WRITE        = 4'd9;
     localparam S_DONE         = 4'd10;
+    localparam S_PRELOAD_WT   = 4'd11;
 
     reg [3:0] state;
     reg [1:0] write_idx;
@@ -398,6 +392,7 @@ module conv2 #(
                 S_LOAD_W_ADDR: begin
                     lb_start_reg <= 1'b0;
                     mmu_valid_in <= 1'b0;
+                    fm2_we       <= 1'b0;
 
                     w_addr <= w_load_oc * 11'd72 + w_load_idx;
                     state  <= S_WAIT_W;
@@ -409,16 +404,18 @@ module conv2 #(
                 S_WAIT_W: begin
                     lb_start_reg <= 1'b0;
                     mmu_valid_in <= 1'b0;
+                    fm2_we       <= 1'b0;
 
                     state <= S_STORE_W;
                 end
 
                 // ----------------------------------------------------------
-                // Store weight into register buffer
+                // Store weight into full weight buffer
                 // ----------------------------------------------------------
                 S_STORE_W: begin
                     lb_start_reg <= 1'b0;
                     mmu_valid_in <= 1'b0;
+                    fm2_we       <= 1'b0;
 
                     w_all[w_load_oc][w_load_idx] <= w_dout;
 
@@ -440,12 +437,37 @@ module conv2 #(
                         y          <= 5'd0;
                         pass       <= 2'd0;
 
-                        state      <= S_LB_START;
+                        // Load the first OC/pass weight group only once.
+                        state      <= S_PRELOAD_WT;
                     end
                 end
 
                 // ----------------------------------------------------------
-                // Load line buffer once per (oc_group, y, pass), not per x.
+                // Preload weights for current oc_base and pass.
+                //
+                // This state replaces repeated weight reload in S_LOAD_PIX.
+                // wt is updated only when pass/oc_base changes,
+                // not for every output x.
+                // ----------------------------------------------------------
+                S_PRELOAD_WT: begin
+                    fm2_we       <= 1'b0;
+                    lb_start_reg <= 1'b0;
+                    mmu_valid_in <= 1'b0;
+
+                    for (i = 0; i < NUM_OC_PAR; i = i + 1) begin
+                        for (j = 0; j < 9; j = j + 1) begin
+                            wt[i][j]      <= w_all[oc_base + i][ic0_calc * 9 + j];
+                            wt[i][j + 9]  <= w_all[oc_base + i][ic1_calc * 9 + j];
+                            wt[i][j + 18] <= w_all[oc_base + i][ic2_calc * 9 + j];
+                            wt[i][j + 27] <= w_all[oc_base + i][ic3_calc * 9 + j];
+                        end
+                    end
+
+                    state <= S_LB_START;
+                end
+
+                // ----------------------------------------------------------
+                // Load line buffer once per current y/pass.
                 // ----------------------------------------------------------
                 S_LB_START: begin
                     fm2_we       <= 1'b0;
@@ -466,9 +488,8 @@ module conv2 #(
                 end
 
                 // ----------------------------------------------------------
-                // Current pass keeps the same loaded line buffer while x scans.
-                // pass 0: partial_sum = 0
-                // pass 1: partial_sum = psum_arr[x]
+                // Load only pixels and partial sum.
+                // Weights are no longer reloaded here.
                 // ----------------------------------------------------------
                 S_LOAD_PIX: begin
                     fm2_we       <= 1'b0;
@@ -481,13 +502,6 @@ module conv2 #(
 
                     for (i = 0; i < NUM_OC_PAR; i = i + 1) begin
                         partial_sum[i] <= (pass == 2'd0) ? 32'sd0 : psum_arr[x][i];
-
-                        for (j = 0; j < 9; j = j + 1) begin
-                            wt[i][j]      <= w_all[oc_base + i][ic0_calc * 9 + j];
-                            wt[i][j + 9]  <= w_all[oc_base + i][ic1_calc * 9 + j];
-                            wt[i][j + 18] <= w_all[oc_base + i][ic2_calc * 9 + j];
-                            wt[i][j + 27] <= w_all[oc_base + i][ic3_calc * 9 + j];
-                        end
                     end
 
                     state <= S_COMPUTE;
@@ -516,10 +530,10 @@ module conv2 #(
                                 x     <= x + 5'd1;
                                 state <= S_LOAD_PIX;
                             end else begin
-                                // Now load ch4~ch7 once and scan all x again.
+                                // Now load ch4~ch7 weights once and scan all x again.
                                 x     <= 5'd0;
                                 pass  <= 2'd1;
-                                state <= S_LB_START;
+                                state <= S_PRELOAD_WT;
                             end
 
                         end else begin
@@ -562,12 +576,12 @@ module conv2 #(
 
                             if (y < OUT_H - 1) begin
                                 y     <= y + 5'd1;
-                                state <= S_LB_START;
+                                state <= S_PRELOAD_WT;
 
                             end else if (oc_base < OUT_CH - NUM_OC_PAR) begin
                                 y       <= 5'd0;
                                 oc_base <= oc_base + NUM_OC_PAR;
-                                state   <= S_LB_START;
+                                state   <= S_PRELOAD_WT;
 
                             end else begin
                                 state <= S_DONE;
