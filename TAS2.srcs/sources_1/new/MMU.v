@@ -26,15 +26,13 @@ module MMU #(
                 .DATA_W(DATA_W),
                 .ACC_W(ACC_W)
             ) u_mac (
-                .data_in    (data_vec[i*DATA_W +: DATA_W]),
-                .weight_in  (weight_vec[i*DATA_W +: DATA_W]),
-                .product_out(product[i])
+                .data_in     (data_vec[i*DATA_W +: DATA_W]),
+                .weight_in   (weight_vec[i*DATA_W +: DATA_W]),
+                .product_out (product[i])
             );
         end
     endgenerate
 
-    // This MMU version assumes NUM_MACS = 36.
-    // 36 -> 18 -> 9 -> 5 -> 3 -> 1
     reg signed [ACC_W-1:0] s1 [0:17];
     reg signed [ACC_W-1:0] s2 [0:8];
     reg signed [ACC_W-1:0] s3 [0:4];
@@ -68,63 +66,74 @@ module MMU #(
             ps_d4 <= {ACC_W{1'b0}};
             ps_d5 <= {ACC_W{1'b0}};
 
-            for (j = 0; j < 18; j = j + 1) begin
+            for (j = 0; j < 18; j = j + 1)
                 s1[j] <= {ACC_W{1'b0}};
-            end
 
-            for (j = 0; j < 9; j = j + 1) begin
+            for (j = 0; j < 9; j = j + 1)
                 s2[j] <= {ACC_W{1'b0}};
-            end
 
-            for (j = 0; j < 5; j = j + 1) begin
+            for (j = 0; j < 5; j = j + 1)
                 s3[j] <= {ACC_W{1'b0}};
-            end
 
-            for (j = 0; j < 3; j = j + 1) begin
+            for (j = 0; j < 3; j = j + 1)
                 s4[j] <= {ACC_W{1'b0}};
-            end
 
             s5 <= {ACC_W{1'b0}};
 
         end else begin
+            // valid pipeline always moves
+            v1 <= valid_in;
+            v2 <= v1;
+            v3 <= v2;
+            v4 <= v3;
+            v5 <= v4;
+
+            valid_out <= v5;
+
             // stage 1: 36 -> 18
-            for (j = 0; j < 18; j = j + 1) begin
-                s1[j] <= product[2*j] + product[2*j + 1];
+            if (valid_in) begin
+                for (j = 0; j < 18; j = j + 1) begin
+                    s1[j] <= product[2*j] + product[2*j + 1];
+                end
+                ps_d1 <= partial_sum_in;
             end
-            ps_d1 <= partial_sum_in;
-            v1    <= valid_in;
 
             // stage 2: 18 -> 9
-            for (j = 0; j < 9; j = j + 1) begin
-                s2[j] <= s1[2*j] + s1[2*j + 1];
+            if (v1) begin
+                for (j = 0; j < 9; j = j + 1) begin
+                    s2[j] <= s1[2*j] + s1[2*j + 1];
+                end
+                ps_d2 <= ps_d1;
             end
-            ps_d2 <= ps_d1;
-            v2    <= v1;
 
             // stage 3: 9 -> 5
-            s3[0] <= s2[0] + s2[1];
-            s3[1] <= s2[2] + s2[3];
-            s3[2] <= s2[4] + s2[5];
-            s3[3] <= s2[6] + s2[7];
-            s3[4] <= s2[8];
-            ps_d3 <= ps_d2;
-            v3    <= v2;
+            if (v2) begin
+                s3[0] <= s2[0] + s2[1];
+                s3[1] <= s2[2] + s2[3];
+                s3[2] <= s2[4] + s2[5];
+                s3[3] <= s2[6] + s2[7];
+                s3[4] <= s2[8];
+                ps_d3 <= ps_d2;
+            end
 
             // stage 4: 5 -> 3
-            s4[0] <= s3[0] + s3[1];
-            s4[1] <= s3[2] + s3[3];
-            s4[2] <= s3[4];
-            ps_d4 <= ps_d3;
-            v4    <= v3;
+            if (v3) begin
+                s4[0] <= s3[0] + s3[1];
+                s4[1] <= s3[2] + s3[3];
+                s4[2] <= s3[4];
+                ps_d4 <= ps_d3;
+            end
 
             // stage 5: 3 -> 1
-            s5    <= s4[0] + s4[1] + s4[2];
-            ps_d5 <= ps_d4;
-            v5    <= v4;
+            if (v4) begin
+                s5    <= s4[0] + s4[1] + s4[2];
+                ps_d5 <= ps_d4;
+            end
 
             // final
-            partial_sum_out <= ps_d5 + s5;
-            valid_out       <= v5;
+            if (v5) begin
+                partial_sum_out <= ps_d5 + s5;
+            end
         end
     end
 
