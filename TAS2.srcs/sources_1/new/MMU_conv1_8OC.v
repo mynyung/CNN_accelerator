@@ -1,5 +1,4 @@
 `timescale 1ns / 1ps
-
 module MMU_CONV1_8OC #(
     parameter DATA_W = 8,
     parameter ACC_W  = 32,
@@ -20,8 +19,6 @@ module MMU_CONV1_8OC #(
     output reg  signed [OUT_CH*ACC_W-1:0] acc_vec
 );
 
-    localparam NUM_MACS = OUT_CH * K_NUM; // 8 * 9 = 72
-
     wire signed [DATA_W-1:0] data_lane   [0:K_NUM-1];
     wire signed [DATA_W-1:0] weight_lane [0:OUT_CH-1][0:K_NUM-1];
     wire signed [ACC_W-1:0]  product     [0:OUT_CH-1][0:K_NUM-1];
@@ -40,7 +37,7 @@ module MMU_CONV1_8OC #(
                 assign weight_lane[oc][k] =
                     weight_vec[(oc*K_NUM + k)*DATA_W +: DATA_W];
 
-                MAC #(
+                MAC_conv1 #(
                     .DATA_W(DATA_W),
                     .ACC_W (ACC_W)
                 ) u_mac (

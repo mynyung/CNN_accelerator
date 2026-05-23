@@ -6,20 +6,15 @@ module conv1(
     input wire start,
     output reg done,
 
-    // image_mem read port
     output reg  [9:0] img_addr,
     input  wire signed [7:0] img_dout,
 
-    // conv1 weight memory read port
     output reg  [6:0] w_addr,
     input  wire signed [7:0] w_dout,
 
-    // fm1 output memory write port
     output reg  [9:0] fm1_addr,
-    output reg  signed [7:0] fm1_din,
-    output reg  fm1_we,
-
-    output reg  [2:0] fm1_ch_sel
+    output reg  signed [8*8-1:0] fm1_din_vec,
+    output reg  [7:0] fm1_we_vec
 );
 
     localparam IMG_W  = 28;
@@ -32,40 +27,52 @@ module conv1(
     localparam DATA_W = 8;
     localparam ACC_W  = 32;
 
-    // ------------------------------------------------------------
-    // Position counters
-    // ------------------------------------------------------------
-    reg [4:0] x;
-    reg [4:0] y;
+    reg [4:0] rd_x;
+    reg [4:0] rd_y;
 
-    reg [3:0] pix_k;
+    reg [4:0] out_x;
+    reg [4:0] out_y;
+
     reg [6:0] w_idx;
-    reg [2:0] write_ch;
 
-    // ------------------------------------------------------------
-    // Local buffers
-    // ------------------------------------------------------------
-    reg signed [DATA_W-1:0] pix [0:K_NUM-1];
-    reg signed [DATA_W-1:0] wt  [0:OUT_CH-1][0:K_NUM-1];
+    reg signed [DATA_W-1:0] wt [0:OUT_CH-1][0:K_NUM-1];
 
-    reg signed [ACC_W-1:0] acc_buf [0:OUT_CH-1];
+    reg signed [DATA_W-1:0] lb0 [0:IMG_W-1];
+    reg signed [DATA_W-1:0] lb1 [0:IMG_W-1];
 
-    wire signed [ACC_W-1:0] mmu_acc [0:OUT_CH-1];
+    reg signed [DATA_W-1:0] w00, w01, w02;
+    reg signed [DATA_W-1:0] w10, w11, w12;
+    reg signed [DATA_W-1:0] w20, w21, w22;
 
-    // ------------------------------------------------------------
-    // Pack data_vec and weight_vec
-    // ------------------------------------------------------------
+    wire signed [DATA_W-1:0] top_pix;
+    wire signed [DATA_W-1:0] mid_pix;
+    wire signed [DATA_W-1:0] bot_pix;
+
+    assign top_pix = lb0[rd_x];
+    assign mid_pix = lb1[rd_x];
+    assign bot_pix = img_dout;
+
+    wire current_window_valid;
+    assign current_window_valid = (rd_y >= 5'd2) && (rd_x >= 5'd2);
+
     wire signed [K_NUM*DATA_W-1:0] data_vec;
+
+    assign data_vec[0*DATA_W +: DATA_W] = w00;
+    assign data_vec[1*DATA_W +: DATA_W] = w01;
+    assign data_vec[2*DATA_W +: DATA_W] = w02;
+    assign data_vec[3*DATA_W +: DATA_W] = w10;
+    assign data_vec[4*DATA_W +: DATA_W] = w11;
+    assign data_vec[5*DATA_W +: DATA_W] = w12;
+    assign data_vec[6*DATA_W +: DATA_W] = w20;
+    assign data_vec[7*DATA_W +: DATA_W] = w21;
+    assign data_vec[8*DATA_W +: DATA_W] = w22;
+
     wire signed [OUT_CH*K_NUM*DATA_W-1:0] weight_vec;
     wire signed [OUT_CH*ACC_W-1:0] acc_vec;
 
-    genvar gk, goc;
+    wire signed [ACC_W-1:0] mmu_acc [0:OUT_CH-1];
 
-    generate
-        for (gk = 0; gk < K_NUM; gk = gk + 1) begin : PACK_DATA
-            assign data_vec[gk*DATA_W +: DATA_W] = pix[gk];
-        end
-    endgenerate
+    genvar goc, gk;
 
     generate
         for (goc = 0; goc < OUT_CH; goc = goc + 1) begin : PACK_WEIGHT_OC
@@ -81,9 +88,6 @@ module conv1(
         end
     endgenerate
 
-    // ------------------------------------------------------------
-    // 72 MAC parallel MMU for conv1
-    // ------------------------------------------------------------
     reg  mmu_valid_in;
     wire mmu_valid_out;
 
@@ -93,20 +97,17 @@ module conv1(
         .OUT_CH(OUT_CH),
         .K_NUM (K_NUM)
     ) u_mmu_conv1_8oc (
-        .clk       (clk),
-        .resetn    (resetn),
-        .valid_in  (mmu_valid_in),
-        .data_vec  (data_vec),
-        .weight_vec(weight_vec),
-        .valid_out (mmu_valid_out),
-        .acc_vec   (acc_vec)
+        .clk        (clk),
+        .resetn     (resetn),
+        .valid_in   (mmu_valid_in),
+        .data_vec   (data_vec),
+        .weight_vec (weight_vec),
+        .valid_out  (mmu_valid_out),
+        .acc_vec    (acc_vec)
     );
 
-    // ------------------------------------------------------------
-    // Quant + ReLU
-    // IMPORTANT:
-    // quant_relu must use latched acc_buf, not raw mmu_acc.
-    // ------------------------------------------------------------
+    reg signed [ACC_W-1:0] acc_buf [0:OUT_CH-1];
+
     wire signed [7:0] q_relu_out [0:OUT_CH-1];
 
     generate
@@ -118,36 +119,12 @@ module conv1(
         end
     endgenerate
 
-    // ------------------------------------------------------------
-    // Address calculation for input pixel
-    // ------------------------------------------------------------
-    reg [1:0] ky;
-    reg [1:0] kx;
-
-    always @(*) begin
-        case (pix_k)
-            4'd0: begin ky = 2'd0; kx = 2'd0; end
-            4'd1: begin ky = 2'd0; kx = 2'd1; end
-            4'd2: begin ky = 2'd0; kx = 2'd2; end
-            4'd3: begin ky = 2'd1; kx = 2'd0; end
-            4'd4: begin ky = 2'd1; kx = 2'd1; end
-            4'd5: begin ky = 2'd1; kx = 2'd2; end
-            4'd6: begin ky = 2'd2; kx = 2'd0; end
-            4'd7: begin ky = 2'd2; kx = 2'd1; end
-            4'd8: begin ky = 2'd2; kx = 2'd2; end
-            default: begin ky = 2'd0; kx = 2'd0; end
-        endcase
-    end
-
     wire [9:0] img_addr_calc;
     wire [9:0] fm1_addr_calc;
 
-    assign img_addr_calc = (y + ky) * IMG_W + (x + kx);
-    assign fm1_addr_calc = y * OUT_W + x;
+    assign img_addr_calc = rd_y * IMG_W + rd_x;
+    assign fm1_addr_calc = out_y * OUT_W + out_x;
 
-    // ------------------------------------------------------------
-    // FSM
-    // ------------------------------------------------------------
     localparam S_IDLE          = 4'd0;
 
     localparam S_W_ADDR        = 4'd1;
@@ -164,7 +141,7 @@ module conv1(
     localparam S_WRITE_SETUP   = 4'd9;
     localparam S_WRITE_PULSE   = 4'd10;
 
-    localparam S_NEXT          = 4'd11;
+    localparam S_NEXT_PIXEL    = 4'd11;
     localparam S_DONE          = 4'd12;
 
     reg [3:0] state;
@@ -181,20 +158,31 @@ module conv1(
             w_addr       <= 7'd0;
 
             fm1_addr     <= 10'd0;
-            fm1_din      <= 8'sd0;
-            fm1_we       <= 1'b0;
-            fm1_ch_sel   <= 3'd0;
+            fm1_din_vec  <= 64'sd0;
+            fm1_we_vec   <= 8'b0000_0000;
 
-            x            <= 5'd0;
-            y            <= 5'd0;
-            pix_k        <= 4'd0;
+            rd_x         <= 5'd0;
+            rd_y         <= 5'd0;
+            out_x        <= 5'd0;
+            out_y        <= 5'd0;
+
             w_idx        <= 7'd0;
-            write_ch     <= 3'd0;
 
             mmu_valid_in <= 1'b0;
 
-            for (i = 0; i < K_NUM; i = i + 1) begin
-                pix[i] <= 8'sd0;
+            w00 <= 8'sd0;
+            w01 <= 8'sd0;
+            w02 <= 8'sd0;
+            w10 <= 8'sd0;
+            w11 <= 8'sd0;
+            w12 <= 8'sd0;
+            w20 <= 8'sd0;
+            w21 <= 8'sd0;
+            w22 <= 8'sd0;
+
+            for (i = 0; i < IMG_W; i = i + 1) begin
+                lb0[i] <= 8'sd0;
+                lb1[i] <= 8'sd0;
             end
 
             for (i = 0; i < OUT_CH; i = i + 1) begin
@@ -207,33 +195,40 @@ module conv1(
         end else begin
             case (state)
 
-                // ------------------------------------------------
-                // IDLE
-                // ------------------------------------------------
                 S_IDLE: begin
                     done         <= 1'b0;
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
-                    x            <= 5'd0;
-                    y            <= 5'd0;
-                    pix_k        <= 4'd0;
+                    rd_x         <= 5'd0;
+                    rd_y         <= 5'd0;
+                    out_x        <= 5'd0;
+                    out_y        <= 5'd0;
+
                     w_idx        <= 7'd0;
-                    write_ch     <= 3'd0;
-                    fm1_ch_sel   <= 3'd0;
+
+                    w00 <= 8'sd0;
+                    w01 <= 8'sd0;
+                    w02 <= 8'sd0;
+                    w10 <= 8'sd0;
+                    w11 <= 8'sd0;
+                    w12 <= 8'sd0;
+                    w20 <= 8'sd0;
+                    w21 <= 8'sd0;
+                    w22 <= 8'sd0;
+
+                    for (i = 0; i < IMG_W; i = i + 1) begin
+                        lb0[i] <= 8'sd0;
+                        lb1[i] <= 8'sd0;
+                    end
 
                     if (start) begin
                         state <= S_W_ADDR;
                     end
                 end
 
-                // ------------------------------------------------
-                // Weight preload: 72 weights
-                // Address order:
-                // w_addr = oc * 9 + k
-                // ------------------------------------------------
                 S_W_ADDR: begin
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
                     w_addr       <= w_idx;
@@ -241,14 +236,14 @@ module conv1(
                 end
 
                 S_W_WAIT: begin
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
                     state        <= S_W_STORE;
                 end
 
                 S_W_STORE: begin
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
                     wt[w_idx / K_NUM][w_idx % K_NUM] <= w_dout;
@@ -258,16 +253,14 @@ module conv1(
                         state <= S_W_ADDR;
                     end else begin
                         w_idx <= 7'd0;
-                        pix_k <= 4'd0;
+                        rd_x  <= 5'd0;
+                        rd_y  <= 5'd0;
                         state <= S_PIX_ADDR;
                     end
                 end
 
-                // ------------------------------------------------
-                // Load 3x3 input pixels for current x,y
-                // ------------------------------------------------
                 S_PIX_ADDR: begin
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
                     img_addr     <= img_addr_calc;
@@ -275,39 +268,49 @@ module conv1(
                 end
 
                 S_PIX_WAIT: begin
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
                     state        <= S_PIX_STORE;
                 end
 
                 S_PIX_STORE: begin
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
-                    pix[pix_k] <= img_dout;
+                    w00 <= w01;
+                    w01 <= w02;
+                    w02 <= top_pix;
 
-                    if (pix_k < K_NUM - 1) begin
-                        pix_k <= pix_k + 4'd1;
-                        state <= S_PIX_ADDR;
-                    end else begin
-                        pix_k <= 4'd0;
+                    w10 <= w11;
+                    w11 <= w12;
+                    w12 <= mid_pix;
+
+                    w20 <= w21;
+                    w21 <= w22;
+                    w22 <= bot_pix;
+
+                    lb0[rd_x] <= lb1[rd_x];
+                    lb1[rd_x] <= img_dout;
+
+                    if (current_window_valid) begin
+                        out_x <= rd_x - 5'd2;
+                        out_y <= rd_y - 5'd2;
                         state <= S_COMPUTE;
+                    end else begin
+                        state <= S_NEXT_PIXEL;
                     end
                 end
 
-                // ------------------------------------------------
-                // Compute 8 output channels in parallel
-                // ------------------------------------------------
                 S_COMPUTE: begin
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b1;
 
                     state        <= S_COMPUTE_WAIT;
                 end
 
                 S_COMPUTE_WAIT: begin
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
                     if (mmu_valid_out) begin
@@ -315,61 +318,45 @@ module conv1(
                             acc_buf[i] <= mmu_acc[i];
                         end
 
-                        write_ch   <= 3'd0;
-                        fm1_ch_sel <= 3'd0;
-                        state      <= S_WRITE_SETUP;
+                        state <= S_WRITE_SETUP;
                     end
                 end
 
-                // ------------------------------------------------
-                // Setup write signals first.
-                // fm1_we is still 0 here.
-                // This gives fm1_addr, fm1_din, fm1_ch_sel one full cycle
-                // to become stable before the actual write pulse.
-                // ------------------------------------------------
                 S_WRITE_SETUP: begin
                     mmu_valid_in <= 1'b0;
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
 
-                    fm1_addr     <= fm1_addr_calc;
-                    fm1_din      <= q_relu_out[write_ch];
-                    fm1_ch_sel   <= write_ch;
+                    fm1_addr <= fm1_addr_calc;
 
-                    state        <= S_WRITE_PULSE;
+                    fm1_din_vec[0*DATA_W +: DATA_W] <= q_relu_out[0];
+                    fm1_din_vec[1*DATA_W +: DATA_W] <= q_relu_out[1];
+                    fm1_din_vec[2*DATA_W +: DATA_W] <= q_relu_out[2];
+                    fm1_din_vec[3*DATA_W +: DATA_W] <= q_relu_out[3];
+                    fm1_din_vec[4*DATA_W +: DATA_W] <= q_relu_out[4];
+                    fm1_din_vec[5*DATA_W +: DATA_W] <= q_relu_out[5];
+                    fm1_din_vec[6*DATA_W +: DATA_W] <= q_relu_out[6];
+                    fm1_din_vec[7*DATA_W +: DATA_W] <= q_relu_out[7];
+
+                    state <= S_WRITE_PULSE;
                 end
 
-                // ------------------------------------------------
-                // Actual write pulse.
-                // Keep addr/din/ch stable while fm1_we is high.
-                // ------------------------------------------------
                 S_WRITE_PULSE: begin
                     mmu_valid_in <= 1'b0;
-                    fm1_we       <= 1'b1;
+                    fm1_we_vec   <= 8'b1111_1111;
 
-                    if (write_ch < OUT_CH - 1) begin
-                        write_ch <= write_ch + 3'd1;
-                        state    <= S_WRITE_SETUP;
-                    end else begin
-                        write_ch <= 3'd0;
-                        state    <= S_NEXT;
-                    end
+                    state <= S_NEXT_PIXEL;
                 end
 
-                // ------------------------------------------------
-                // Next spatial position
-                // ------------------------------------------------
-                S_NEXT: begin
-                    fm1_we       <= 1'b0;
+                S_NEXT_PIXEL: begin
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
-                    if (x < OUT_W - 1) begin
-                        x     <= x + 5'd1;
-                        pix_k <= 4'd0;
+                    if (rd_x < IMG_W - 1) begin
+                        rd_x  <= rd_x + 5'd1;
                         state <= S_PIX_ADDR;
-                    end else if (y < OUT_H - 1) begin
-                        x     <= 5'd0;
-                        y     <= y + 5'd1;
-                        pix_k <= 4'd0;
+                    end else if (rd_y < IMG_H - 1) begin
+                        rd_x  <= 5'd0;
+                        rd_y  <= rd_y + 5'd1;
                         state <= S_PIX_ADDR;
                     end else begin
                         state <= S_DONE;
@@ -378,7 +365,7 @@ module conv1(
 
                 S_DONE: begin
                     done         <= 1'b1;
-                    fm1_we       <= 1'b0;
+                    fm1_we_vec   <= 8'b0000_0000;
                     mmu_valid_in <= 1'b0;
 
                     state        <= S_DONE;

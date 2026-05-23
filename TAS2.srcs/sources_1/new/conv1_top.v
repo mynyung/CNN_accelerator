@@ -174,16 +174,15 @@ module cnn_core(
     // -------------------------------------------------------------------------
     // Conv1 internal wires
     // -------------------------------------------------------------------------
-    wire [9:0]        conv1_img_addr;
-    wire signed [7:0] conv1_img_dout;
+    wire [9:0]         conv1_img_addr;
+    wire signed [7:0]  conv1_img_dout;
 
-    wire [6:0]        conv1_w_addr;
-    wire signed [7:0] conv1_w_dout;
+    wire [6:0]         conv1_w_addr;
+    wire signed [7:0]  conv1_w_dout;
 
-    wire [9:0]        conv1_fm1_addr;
-    wire signed [7:0] conv1_fm1_din;
-    wire              conv1_fm1_we;
-    wire [2:0]        conv1_fm1_ch_sel;
+    wire [9:0]         conv1_fm1_addr;
+    wire signed [63:0] conv1_fm1_din_vec;
+    wire [7:0]         conv1_fm1_we_vec;
  
     // -------------------------------------------------------------------------
     // Conv2 internal wires
@@ -258,21 +257,20 @@ module cnn_core(
     // Conv1 Instance
     // -------------------------------------------------------------------------
     conv1 u_conv1 (
-        .clk        (clk),
-        .resetn     (resetn),
-        .start      (conv1_start),
-        .done       (conv1_done),
+        .clk          (clk),
+        .resetn       (resetn),
+        .start        (conv1_start),
+        .done         (conv1_done),
 
-        .img_addr   (conv1_img_addr),
-        .img_dout   (conv1_img_dout),
+        .img_addr     (conv1_img_addr),
+        .img_dout     (conv1_img_dout),
 
-        .w_addr     (conv1_w_addr),
-        .w_dout     (conv1_w_dout),
+        .w_addr       (conv1_w_addr),
+        .w_dout       (conv1_w_dout),
 
-        .fm1_addr   (conv1_fm1_addr),
-        .fm1_din    (conv1_fm1_din),
-        .fm1_we     (conv1_fm1_we),
-        .fm1_ch_sel (conv1_fm1_ch_sel)
+        .fm1_addr     (conv1_fm1_addr),
+        .fm1_din_vec  (conv1_fm1_din_vec),
+        .fm1_we_vec   (conv1_fm1_we_vec)
     );
  
     // -------------------------------------------------------------------------
@@ -450,34 +448,18 @@ module cnn_core(
     );
  
     // -------------------------------------------------------------------------
-    // FM1 write demux
-    // Conv1 writes each output channel into one separate FM1 channel memory.
-    // -------------------------------------------------------------------------
-    wire fm1_ch0_we;
-    wire fm1_ch1_we;
-    wire fm1_ch2_we;
-    wire fm1_ch3_we;
-    wire fm1_ch4_we;
-    wire fm1_ch5_we;
-    wire fm1_ch6_we;
-    wire fm1_ch7_we;
-    
-    assign fm1_ch0_we = conv1_fm1_we && (conv1_fm1_ch_sel == 3'd0);
-    assign fm1_ch1_we = conv1_fm1_we && (conv1_fm1_ch_sel == 3'd1);
-    assign fm1_ch2_we = conv1_fm1_we && (conv1_fm1_ch_sel == 3'd2);
-    assign fm1_ch3_we = conv1_fm1_we && (conv1_fm1_ch_sel == 3'd3);
-    assign fm1_ch4_we = conv1_fm1_we && (conv1_fm1_ch_sel == 3'd4);
-    assign fm1_ch5_we = conv1_fm1_we && (conv1_fm1_ch_sel == 3'd5);
-    assign fm1_ch6_we = conv1_fm1_we && (conv1_fm1_ch_sel == 3'd6);
-    assign fm1_ch7_we = conv1_fm1_we && (conv1_fm1_ch_sel == 3'd7);
-   
-    // -------------------------------------------------------------------------
     // FM1 channel memory banks
     //
     // Port A is unused.
     // Port B is shared:
-    //   T_CONV1: Conv1 writes selected channel.
+    //   T_CONV1: Conv1 writes all 8 channels in parallel.
     //   T_CONV2: Conv2 reads 4 channels in parallel.
+    //
+    // Conv1:
+    //   ch0~ch7 all use conv1_fm1_addr.
+    //   ch0 data = conv1_fm1_din_vec[0*8 +: 8]
+    //   ch1 data = conv1_fm1_din_vec[1*8 +: 8]
+    //   ...
     //
     // Conv2 address mapping:
     //   ch0/ch4 <- conv2_fm1_addr0
@@ -485,6 +467,7 @@ module cnn_core(
     //   ch2/ch6 <- conv2_fm1_addr2
     //   ch3/ch7 <- conv2_fm1_addr3
     // -------------------------------------------------------------------------
+
     fm1_ch0_mem u_fm1_ch0_mem (
         .clka  (clk),
         .ena   (1'b0),
@@ -495,9 +478,9 @@ module cnn_core(
 
         .clkb  (clk),
         .enb   (fm1_mem_en),
-        .web   ((top_state == T_CONV1) ? fm1_ch0_we : 1'b0),
+        .web   ((top_state == T_CONV1) ? conv1_fm1_we_vec[0] : 1'b0),
         .addrb ((top_state == T_CONV1) ? conv1_fm1_addr : conv2_fm1_addr0),
-        .dinb  (conv1_fm1_din),
+        .dinb  (conv1_fm1_din_vec[0*8 +: 8]),
         .doutb (fm1_ch0_dout)
     );
 
@@ -511,9 +494,9 @@ module cnn_core(
 
         .clkb  (clk),
         .enb   (fm1_mem_en),
-        .web   ((top_state == T_CONV1) ? fm1_ch1_we : 1'b0),
+        .web   ((top_state == T_CONV1) ? conv1_fm1_we_vec[1] : 1'b0),
         .addrb ((top_state == T_CONV1) ? conv1_fm1_addr : conv2_fm1_addr1),
-        .dinb  (conv1_fm1_din),
+        .dinb  (conv1_fm1_din_vec[1*8 +: 8]),
         .doutb (fm1_ch1_dout)
     );
 
@@ -527,9 +510,9 @@ module cnn_core(
 
         .clkb  (clk),
         .enb   (fm1_mem_en),
-        .web   ((top_state == T_CONV1) ? fm1_ch2_we : 1'b0),
+        .web   ((top_state == T_CONV1) ? conv1_fm1_we_vec[2] : 1'b0),
         .addrb ((top_state == T_CONV1) ? conv1_fm1_addr : conv2_fm1_addr2),
-        .dinb  (conv1_fm1_din),
+        .dinb  (conv1_fm1_din_vec[2*8 +: 8]),
         .doutb (fm1_ch2_dout)
     );
 
@@ -543,9 +526,9 @@ module cnn_core(
 
         .clkb  (clk),
         .enb   (fm1_mem_en),
-        .web   ((top_state == T_CONV1) ? fm1_ch3_we : 1'b0),
+        .web   ((top_state == T_CONV1) ? conv1_fm1_we_vec[3] : 1'b0),
         .addrb ((top_state == T_CONV1) ? conv1_fm1_addr : conv2_fm1_addr3),
-        .dinb  (conv1_fm1_din),
+        .dinb  (conv1_fm1_din_vec[3*8 +: 8]),
         .doutb (fm1_ch3_dout)
     );
 
@@ -559,9 +542,9 @@ module cnn_core(
 
         .clkb  (clk),
         .enb   (fm1_mem_en),
-        .web   ((top_state == T_CONV1) ? fm1_ch4_we : 1'b0),
+        .web   ((top_state == T_CONV1) ? conv1_fm1_we_vec[4] : 1'b0),
         .addrb ((top_state == T_CONV1) ? conv1_fm1_addr : conv2_fm1_addr0),
-        .dinb  (conv1_fm1_din),
+        .dinb  (conv1_fm1_din_vec[4*8 +: 8]),
         .doutb (fm1_ch4_dout)
     );
 
@@ -575,9 +558,9 @@ module cnn_core(
 
         .clkb  (clk),
         .enb   (fm1_mem_en),
-        .web   ((top_state == T_CONV1) ? fm1_ch5_we : 1'b0),
+        .web   ((top_state == T_CONV1) ? conv1_fm1_we_vec[5] : 1'b0),
         .addrb ((top_state == T_CONV1) ? conv1_fm1_addr : conv2_fm1_addr1),
-        .dinb  (conv1_fm1_din),
+        .dinb  (conv1_fm1_din_vec[5*8 +: 8]),
         .doutb (fm1_ch5_dout)
     );
 
@@ -591,9 +574,9 @@ module cnn_core(
 
         .clkb  (clk),
         .enb   (fm1_mem_en),
-        .web   ((top_state == T_CONV1) ? fm1_ch6_we : 1'b0),
+        .web   ((top_state == T_CONV1) ? conv1_fm1_we_vec[6] : 1'b0),
         .addrb ((top_state == T_CONV1) ? conv1_fm1_addr : conv2_fm1_addr2),
-        .dinb  (conv1_fm1_din),
+        .dinb  (conv1_fm1_din_vec[6*8 +: 8]),
         .doutb (fm1_ch6_dout)
     );
 
@@ -607,9 +590,9 @@ module cnn_core(
 
         .clkb  (clk),
         .enb   (fm1_mem_en),
-        .web   ((top_state == T_CONV1) ? fm1_ch7_we : 1'b0),
+        .web   ((top_state == T_CONV1) ? conv1_fm1_we_vec[7] : 1'b0),
         .addrb ((top_state == T_CONV1) ? conv1_fm1_addr : conv2_fm1_addr3),
-        .dinb  (conv1_fm1_din),
+        .dinb  (conv1_fm1_din_vec[7*8 +: 8]),
         .doutb (fm1_ch7_dout)
     );
  
